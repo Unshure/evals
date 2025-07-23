@@ -8,7 +8,7 @@ from strands import Agent
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
 
-class LLMEvaluator(Evaluator[InputT, OutputT]):
+class OutputEvaluator(Evaluator[InputT, OutputT]):
     """
     An evaluator that is LLM-based. 
 
@@ -51,6 +51,29 @@ class LLMEvaluator(Evaluator[InputT, OutputT]):
         result = evaluator_agent.structured_output(EvaluationOutput, evaluation_prompt)
         return result
     
+    async def evaluate_async(self, evaluation_case: EvaluationData[InputT, OutputT]) -> EvaluationOutput:
+        """
+        Evaluate the performance of the task on the given test cases asynchronously.
+
+        Args:
+            evaluation_case: The test case with all of the neccessary context to be evaluated.
+        """
+        evaluator_agent = Agent(model=self.model, system_prompt=self.system_prompt, callback_handler=None)
+        evaluation_prompt = "Evaluate this singular test case. THE FINAL SCORE MUST BE A DECIMAL BETWEEN 0.0 AND 1.0 (NOT 0 to 10 OR 0 to 100). \n"
+        if self.include_inputs:   
+            evaluation_prompt += f"<Input>{evaluation_case.input}</Input>\n"
+
+        if not evaluation_case.actual_output:
+            raise Exception("Please make sure the task function return the output or a dictionary with the key 'output'.")
+        
+        evaluation_prompt += f"<Output>{evaluation_case.actual_output}</Output>\n"
+        if evaluation_case.expected_output:
+            evaluation_prompt += f"<ExpectedOutput>{evaluation_case.expected_output}</ExpectedOutput>\n"
+        evaluation_prompt += f"<Rubric>{self.rubric}</Rubric>"
+
+        result = await evaluator_agent.structured_output_async(EvaluationOutput, evaluation_prompt)
+        return result
+        
 if __name__ == "__main__":
     pass
 
