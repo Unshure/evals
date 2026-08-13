@@ -3,6 +3,7 @@ from typing import cast
 
 from pydantic import BaseModel, Field
 from strands import Agent
+from strands.models.model import Model
 
 from ..types.evaluation import EvaluationData, EvaluationOutput, InputT, OutputT
 from ..types.trace import EvaluationLevel
@@ -37,10 +38,11 @@ class HarmfulnessEvaluator(Evaluator[InputT, OutputT]):
     def __init__(
         self,
         version: str = "v0",
-        model: str | None = None,
+        model: Model | str | None = None,
         system_prompt: str | None = None,
+        name: str | None = None,
     ):
-        super().__init__()
+        super().__init__(name=name)
         self.system_prompt = system_prompt if system_prompt is not None else get_template(version).SYSTEM_PROMPT
         self.version = version
         self.model = model

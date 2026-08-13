@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing_extensions import Any, Generic, TypedDict, TypeVar, Union
+from typing_extensions import Any, Generic, TypedDict, TypeVar
 
 from .trace import Session
 
@@ -8,8 +8,8 @@ OutputT = TypeVar("OutputT")
 
 
 class Interaction(TypedDict, total=False):
-    """
-    Represents a single interaction in a multi-agent or multi-step system.
+    """Represents a single interaction in a multi-agent or multi-step system.
+
 
     Used to capture the communication flow and dependencies between different
     components (agents, tools, or processing nodes) during task execution.
@@ -31,6 +31,18 @@ class Interaction(TypedDict, total=False):
     node_name: str
     dependencies: list
     messages: list
+
+
+class EnvironmentState(BaseModel):
+    """A named piece of environment state captured after task execution.
+
+    Attributes:
+        name: Identifier for this state (e.g., "test_results", "file_system")
+        state: The captured state data
+    """
+
+    name: str
+    state: Any
 
 
 class TaskOutput(TypedDict, total=False):
@@ -56,9 +68,10 @@ class TaskOutput(TypedDict, total=False):
     """
 
     output: Any
-    trajectory: list[Any]
+    trajectory: list[Any] | Session | None
     interactions: list[Interaction]
     input: Any
+    environment_state: list[EnvironmentState]
 
 
 class EvaluationData(BaseModel, Generic[InputT, OutputT]):
@@ -69,6 +82,11 @@ class EvaluationData(BaseModel, Generic[InputT, OutputT]):
         input: The input to the task. eg. the query to the agent
         actual_output: The actual response given the input.
         expected_output: The expected response given the input.
+        expected_assertion: Human-authored success assertions describing expected agent actions,
+            responses, or behaviors. Used by assertion-based evaluators (e.g., GoalSuccessRateEvaluator)
+            to judge whether the agent satisfied explicit criteria rather than inferring goals
+            from the conversation. Example: 'find_user_id_by_name_zip is called with
+            {"first_name": "Yusuf", "last_name": "Rossi", "zip": "19122"}'
         actual_trajectory: The actual trajectory of a task given the input.
         expected_trajectory: The expected trajectory of a task given the input.
         name: The name of the test case. This will be used to identify the test in the summary report.
@@ -81,11 +99,14 @@ class EvaluationData(BaseModel, Generic[InputT, OutputT]):
     actual_output: OutputT | None = None
     name: str | None = None
     expected_output: OutputT | None = None
-    expected_trajectory: Union[list[Any], Session, None] = None
-    actual_trajectory: Union[list[Any], Session, None] = None
+    expected_assertion: str | None = None
+    expected_trajectory: list[Any] | Session | None = None
+    actual_trajectory: list[Any] | Session | None = None
     metadata: dict[str, Any] | None = None
     actual_interactions: list[Interaction] | None = None
     expected_interactions: list[Interaction] | None = None
+    actual_environment_state: list[EnvironmentState] | None = None
+    expected_environment_state: list[EnvironmentState] | None = None
 
 
 class EvaluationOutput(BaseModel):

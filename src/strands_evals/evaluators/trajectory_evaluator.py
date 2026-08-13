@@ -2,7 +2,7 @@ from typing import cast
 
 from strands import Agent
 from strands.models.model import Model
-from typing_extensions import Any, Union
+from typing_extensions import Any
 
 from ..tools.evaluation_tools import any_order_match_scorer, exact_match_scorer, in_order_match_scorer
 from ..types.evaluation import EvaluationData, EvaluationOutput, InputT, OutputT
@@ -23,25 +23,30 @@ class TrajectoryEvaluator(Evaluator[InputT, OutputT]):
         system_prompt: System prompt to guide model behavior.
                     If None, the evaluator will use one of the default template.
         include_inputs: Whether to include inputs to the task in the evaluation or not.
+        tools: Optional additional tools for the evaluator agent. Merged with the
+                    default trajectory scoring tools (exact/in-order/any-order match).
     """
 
     def __init__(
         self,
         rubric: str,
         trajectory_description: dict | None = None,
-        model: Union[Model, str, None] = None,
+        model: Model | str | None = None,
         system_prompt: str = SYSTEM_PROMPT,
         include_inputs: bool = True,
+        name: str | None = None,
+        tools: list[Any] | None = None,
     ):
-        super().__init__()
+        super().__init__(name=name)
         self.rubric = rubric
         self.trajectory_description = trajectory_description
         self.model = model
         self.include_inputs = include_inputs
-        self._tools: list[Union[str, dict[str, str], Any]] | None = [
+        self._tools: list[str | dict[str, str] | Any] = [
             exact_match_scorer,
             in_order_match_scorer,
             any_order_match_scorer,
+            *(tools or []),
         ]
         self.system_prompt = system_prompt
 

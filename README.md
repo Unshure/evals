@@ -19,6 +19,7 @@
     <a href="https://github.com/strands-agents/evals/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/strands-agents/evals"/></a>
     <a href="https://pypi.org/project/strands-agents-evals/"><img alt="PyPI version" src="https://img.shields.io/pypi/v/strands-agents-evals"/></a>
     <a href="https://python.org"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/strands-agents-evals"/></a>
+    <a href="https://discord.gg/strands"><img alt="Strands Discord" src="https://img.shields.io/badge/Discord-Strands-5865F2?logo=discord&logoColor=white"/></a>
   </div>
   
   <p>
@@ -36,13 +37,17 @@ Strands Evaluation is a powerful framework for evaluating AI agents and LLM appl
 ## Feature Overview
 
 - **Multiple Evaluation Types**: Output evaluation, trajectory analysis, tool usage assessment, and interaction evaluation
-- **Dynamic Simulators**: Multi-turn conversation simulation with realistic user behavior and goal-oriented interactions
+- **Multimodal Evaluation**: MLLM-as-a-Judge evaluators for image-to-text tasks with built-in rubrics
+- **Dynamic Simulators**: Multi-turn conversation simulation with realistic user behavior, goal-oriented interactions, and LLM-powered tool simulation with shared state
 - **LLM-as-a-Judge**: Built-in evaluators using language models for sophisticated assessment with structured scoring
 - **Trace-based Evaluation**: Analyze agent behavior through OpenTelemetry execution traces
 - **Automated Experiment Generation**: Generate comprehensive test suites from context descriptions
 - **Custom Evaluators**: Extensible framework for domain-specific evaluation logic
 - **Experiment Management**: Save, load, and version your evaluation experiments with JSON serialization
 - **Built-in Scoring Tools**: Helper functions for exact, in-order, and any-order trajectory matching
+- **Failure Detection & Root Cause Analysis**: Automatically detect failures in agent sessions and diagnose root causes with actionable fix recommendations
+- **Chaos Testing**: Deterministic fault injection via Strands plugin hooks — simulate tool timeouts, network errors, and response corruption to evaluate agent resilience
+- **Red Team Evaluation**: Adversarial safety testing with built-in attack strategies (Crescendo, GOAT, PAIR, BadLikertJudge, SequentialBreak); see [src/strands_evals/experimental/redteam/README.md](src/strands_evals/experimental/redteam/README.md)
 
 ## Quick Start
 
@@ -90,9 +95,46 @@ def get_response(case: Case) -> str:
     return str(agent(case.input))
 
 # Run evaluations
-reports = experiment.run_evaluations(get_response)
-reports[0].run_display()
+report = experiment.run_evaluations(get_response)
+report.run_display()
 ```
+
+## Command-Line Interface
+
+Installing `strands-agents-evals` also installs the `strands-evals` console script, a thin wrapper over the Python API for CI and one-off use. It has five subcommands:
+
+| Command | Purpose |
+| --- | --- |
+| `strands-evals run` | Execute an Experiment against an `--agent` factory or `--task` callable, or run a single ad-hoc case via `--input` + `--evaluator`/`--expected-output`/`--rubric`. |
+| `strands-evals validate` | Schema-check a serialized Experiment JSON file (CI gate before `run`). |
+| `strands-evals report` | Render an existing `EvaluationReport` JSON via Rich, or dump it as JSON. |
+| `strands-evals diagnose` | Run `detect_failures`, `analyze_root_cause`, or the full `diagnose_session` pipeline on a Session JSON file. |
+| `strands-evals generate` | Synthesize an Experiment via `ExperimentGenerator` from a free-form `--context` or an existing `--experiment` file. |
+
+Common flows:
+
+```bash
+# Schema-check, then run an experiment file against an agent factory
+strands-evals validate experiments/customer_service.json
+strands-evals run experiments/customer_service.json \
+  --agent my_pkg.agents:build_agent \
+  --display
+
+# One-off ad-hoc run with no experiment file
+strands-evals run \
+  --input "What is the capital of France?" \
+  --expected-output "Paris" \
+  --agent my_pkg.agents:build_agent
+
+# Diagnose a failing session captured to JSON
+strands-evals diagnose session.json --confidence medium
+
+# Generate a starter experiment from a tools description
+strands-evals generate --context "$(cat tools.txt)" --num-cases 10 \
+  --evaluator TrajectoryEvaluator -o experiments/generated.json
+```
+
+Run any subcommand with `--help` for the full flag set (custom evaluators via `MODULE:CLASS`, trace attributes, `--fail-on` exit-code rules, output formats, etc.).
 
 ## Installation
 
@@ -125,7 +167,7 @@ from strands_evals.evaluators import OutputEvaluator
 evaluator = OutputEvaluator(
     rubric="Score 1.0 for accurate, complete responses. Score 0.5 for partial answers. Score 0.0 for incorrect or unhelpful responses.",
     include_inputs=True,  # Include context in evaluation
-    model="us.anthropic.claude-sonnet-4-20250514-v1:0"  # Custom judge model
+    model="global.anthropic.claude-sonnet-4-6"  # Custom judge model
 )
 ```
 
@@ -191,8 +233,8 @@ evaluators = [HelpfulnessEvaluator()]
 experiment = Experiment[str, str](cases=test_cases, evaluators=evaluators)
 
 # Run evaluations
-reports = experiment.run_evaluations(user_task_function)
-reports[0].run_display()
+report = experiment.run_evaluations(user_task_function)
+report.run_display()
 ```
 
 ### Multi-turn Conversation Simulation
@@ -252,7 +294,7 @@ evaluators = [
 ]
 
 experiment = Experiment(cases=test_cases, evaluators=evaluators)
-reports = experiment.run_evaluations(task_function)
+report = experiment.run_evaluations(task_function)
 ```
 
 **Key Benefits:**
@@ -261,6 +303,61 @@ reports = experiment.run_evaluations(task_function)
 - **Realistic Conversations**: Generate authentic multi-turn interaction patterns
 - **No Predefined Scripts**: Test agents without hardcoded conversation paths
 - **Comprehensive Evaluation**: Combine with trace-based evaluators for full assessment
+
+### Tool Simulation
+
+Simulate tool behavior with LLM-powered responses for controlled agent evaluation using ToolSimulator. Register tools with a decorator, define output schemas, and optionally share state across related tools — the simulator replaces real execution with realistic, schema-validated responses:
+
+```python
+from typing import Any
+from enum import Enum
+from pydantic import BaseModel, Field
+from strands import Agent
+from strands_evals import Case, Experiment
+from strands_evals.evaluators import GoalSuccessRateEvaluator
+from strands_evals.simulation.tool_simulator import ToolSimulator
+
+tool_simulator = ToolSimulator()
+
+# Define output schema
+class HVACMode(str, Enum):
+    HEAT = "heat"
+    COOL = "cool"
+    AUTO = "auto"
+    OFF = "off"
+
+class HVACResponse(BaseModel):
+    temperature: float = Field(..., description="Target temperature in Fahrenheit")
+    mode: HVACMode = Field(..., description="HVAC mode")
+    status: str = Field(default="success", description="Operation status")
+
+# Register tool — the function body is never called; the LLM generates responses
+@tool_simulator.tool(
+    share_state_id="room_environment",
+    initial_state_description="Room: 68°F, humidity 45%, HVAC off",
+    output_schema=HVACResponse,
+)
+def hvac_controller(temperature: float, mode: str) -> dict[str, Any]:
+    """Control heating/cooling system that affects room temperature and humidity."""
+    pass
+
+def task_function(case: Case) -> dict:
+    hvac_tool = tool_simulator.get_tool("hvac_controller")
+    agent = Agent(tools=[hvac_tool], callback_handler=None)
+    response = agent(case.input)
+    return {"output": str(response)}
+
+cases = [Case(name="heat_control", input="Turn on the heat to 72 degrees")]
+experiment = Experiment(cases=cases, evaluators=[GoalSuccessRateEvaluator()])
+report = experiment.run_evaluations(task_function)
+```
+
+**Key Benefits:**
+- **No Real Infrastructure**: Test tool-using agents without live APIs, databases, or services
+- **Schema-Validated Responses**: Pydantic output schemas ensure structured, consistent tool responses
+- **Shared State**: Related tools (e.g., sensor + controller) share state via `share_state_id` for coherent behavior
+- **Stateful Context**: Call history and initial state are passed to the LLM for consistent multi-call sequences
+- **Drop-in Replacement**: Simulated tools plug directly into Strands `Agent` via `get_tool()`
 
 ### Automated Experiment Generation
 
@@ -291,6 +388,80 @@ experiment = await generator.from_context_async(
 # Save generated experiment
 experiment.to_file("generated_experiment", "json")
 ```
+
+### Failure Detection & Diagnosis
+
+Detect failures in agent sessions and analyze root causes to get actionable fix recommendations:
+
+```python
+from strands_evals import Case, DiagnosisConfig, Experiment
+from strands_evals.evaluators import HelpfulnessEvaluator
+from strands_evals.types.detector import ConfidenceLevel, DiagnosisTrigger
+
+# Enable diagnosis on failing cases — runs failure detection then root cause analysis
+experiment = Experiment(
+    cases=test_cases,
+    evaluators=[HelpfulnessEvaluator()],
+    diagnosis_config=DiagnosisConfig(
+        trigger=DiagnosisTrigger.ON_FAILURE,           # ON_FAILURE or ALWAYS
+        confidence_threshold=ConfidenceLevel.MEDIUM,   # LOW, MEDIUM, or HIGH
+    ),
+)
+
+report = experiment.run_evaluations(task_function)
+
+# Display results with recommendations
+report.display(include_recommendations=True)
+```
+
+You can also use the detectors standalone on any `Session` object (`strands_evals.types.trace.Session`):
+
+```python
+from strands_evals.detectors import detect_failures, analyze_root_cause, diagnose_session
+from strands_evals.types.detector import ConfidenceLevel
+
+# Full pipeline: detect failures → root cause analysis
+result = diagnose_session(session, confidence_threshold=ConfidenceLevel.MEDIUM)
+
+for rc in result.root_causes:
+    print(f"{rc.fix_type}: {rc.fix_recommendation}")
+
+# Or run each step independently
+failures = detect_failures(session, confidence_threshold=ConfidenceLevel.MEDIUM)
+if failures.failures:
+    rca = analyze_root_cause(session, failures=failures.failures)
+
+# analyze_root_cause calls detect_failures automatically if failures is not provided
+rca = analyze_root_cause(session)
+```
+
+### Chaos Testing
+
+Inject deterministic tool failures and response corruption to evaluate how an agent handles adverse conditions. Effects fire through Strands' native plugin hooks, and the user's task body stays chaos-free:
+
+```python
+from strands import Agent
+from strands_evals import Case
+from strands_evals.chaos import (
+    ChaosCase, ChaosExperiment, ChaosPlugin,
+    Timeout, NetworkError, TruncateFields,
+)
+
+base_cases = [Case(name="flight_search", input="Find flights to Tokyo")]
+effect_maps = {
+    "search_timeout":  {"tool_effects": {"search_tool":   [Timeout()]}},
+    "db_truncate":     {"tool_effects": {"database_tool": [TruncateFields(max_length=20)]}},
+}
+chaos_cases = ChaosCase.expand(base_cases, effect_maps, include_no_effect_baseline=True)
+
+def task(case):
+    agent = Agent(tools=[search_tool, database_tool], plugins=[ChaosPlugin()])
+    return {"output": str(agent(case.input))}
+
+report = ChaosExperiment(cases=chaos_cases, evaluators=[...]).run_evaluations(task=task)
+```
+
+Available effects: `Timeout`, `NetworkError`, `ExecutionError`, `ValidationError` (cancel the tool call); `TruncateFields`, `RemoveFields`, `CorruptValues` (corrupt the response). Pair with chaos-aware evaluators in `strands_evals.evaluators.chaos` (`FailureCommunicationEvaluator`, `PartialCompletionEvaluator`, `RecoveryStrategyEvaluator`). For the full authoring guide see [`SKILL.md`](SKILL.md#chaos-testing-deterministic-fault-injection).
 
 ### Custom Evaluators with Structured Output
 
@@ -346,6 +517,58 @@ tool_parameter_evaluator = ToolParameterAccuracyEvaluator(
 )
 ```
 
+### Multimodal Evaluation (MLLM-as-a-Judge)
+
+Evaluate multimodal agent responses involving images and text using MLLM-as-a-Judge:
+
+```python
+from strands_evals import Case, Experiment
+from strands_evals.evaluators import (
+    MultimodalCorrectnessEvaluator,
+    MultimodalFaithfulnessEvaluator,
+    MultimodalInstructionFollowingEvaluator,
+    MultimodalOverallQualityEvaluator,
+)
+from strands_evals.types import ImageData, MultimodalInput
+
+# Create image data from various sources
+image = ImageData(source="path/to/image.png")
+# Also supports: base64 strings, data URLs, HTTP URLs, PIL Images, raw bytes
+
+# Define test cases with multimodal input
+test_cases = [
+    Case[MultimodalInput, str](
+        name="image-description-1",
+        input=MultimodalInput(
+            media=image,
+            instruction="Describe the contents of this image in detail.",
+        ),
+    )
+]
+
+# Use built-in evaluators with default rubrics (reference-free by default; reference-based rubric auto-selected when expected_output is provided)
+evaluators = [
+    MultimodalCorrectnessEvaluator(),       # Factual accuracy and completeness
+    MultimodalFaithfulnessEvaluator(),      # Grounded in media without hallucinations
+    MultimodalInstructionFollowingEvaluator(),  # Addresses query requirements
+    MultimodalOverallQualityEvaluator(),    # Visual accuracy, adherence, completeness, coherence
+]
+
+# Run evaluation
+experiment = Experiment[MultimodalInput, str](cases=test_cases, evaluators=evaluators)
+
+def get_response(case: Case) -> str:
+    agent = Agent(callback_handler=None)
+    image = case.input.media
+    return str(agent([
+        {"image": {"format": image.format or "png", "source": {"bytes": image.to_bytes()}}},
+        {"text": case.input.instruction}
+    ]))
+
+report = experiment.run_evaluations(get_response)
+report.run_display()
+```
+
 ## Available Evaluators
 
 ### Output-Based Evaluators
@@ -372,10 +595,29 @@ Evaluate the most recent turn in a conversation:
 - **ConcisenessEvaluator**: Evaluates response brevity with three-level scoring
 - **ResponseRelevanceEvaluator**: Evaluates relevance of responses to user questions
 - **HarmfulnessEvaluator**: Binary evaluation for harmful content detection
+- **RefusalEvaluator**: Binary evaluation for whether responses refuse to address the prompt
+- **StereotypingEvaluator**: Binary evaluation for bias or stereotypical content against groups
+- **InstructionFollowingEvaluator**: Binary evaluation for whether explicit instructions are followed
 
 #### Session-Level Evaluators
 Evaluate entire conversation sessions:
 - **GoalSuccessRateEvaluator**: Measures if user goals were achieved across the full conversation
+
+### Multimodal Evaluators
+These evaluators assess multimodal (image-to-text) responses using MLLM-as-a-Judge, with built-in rubrics that support both reference-based and reference-free evaluation:
+
+- **MultimodalCorrectnessEvaluator**: Evaluates factual accuracy and completeness against media content
+- **MultimodalFaithfulnessEvaluator**: Evaluates whether responses are grounded in media without hallucinations
+- **MultimodalInstructionFollowingEvaluator**: Evaluates whether responses address query requirements and constraints
+- **MultimodalOverallQualityEvaluator**: Holistic evaluation across visual accuracy, instruction adherence, completeness, and coherence
+- **MultimodalOutputEvaluator**: Base class for custom multimodal evaluators with configurable rubrics
+
+### Detectors
+Analyze agent sessions to identify failures and their root causes:
+
+- **detect_failures**: Scans a Session for failures with configurable confidence thresholds
+- **analyze_root_cause**: Identifies root causes for detected failures with fix recommendations
+- **diagnose_session**: End-to-end pipeline combining failure detection and root cause analysis
 
 ## Experiment Management and Serialization
 
@@ -411,9 +653,13 @@ metrics = {
     "user_satisfaction": "Subjective helpfulness ratings"
 }
 
-# Generate analysis reports
-reports = experiment.run_evaluations(task_function)
-reports[0].run_display()  # Interactive display with metrics breakdown
+# Generate analysis report
+report = experiment.run_evaluations(task_function)
+report.run_display()  # Interactive display with metrics breakdown
+
+# Multi-evaluator runs return a single flattened report; each row is tagged with its evaluator
+# via cases[i]["evaluator"], so you can filter or group without an extra flatten step.
+report.display(include_recommendations=True)
 ```
 
 ## Best Practices
@@ -451,6 +697,9 @@ We welcome contributions! See our [Contributing Guide](CONTRIBUTING.md) for deta
 - Contributing via Pull Requests
 - Code of Conduct
 - Reporting of security issues
+
+## Stay in touch with the team
+Come meet the Strands team and other users on [**Discord**](https://discord.com/invite/strands)
 
 ## License
 

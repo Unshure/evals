@@ -14,7 +14,8 @@ class EvaluationReport(BaseModel):
     Attributes:
         overall_score: The overall score of the task.
         scores: A list of the score for each test case in order.
-        cases: A list of records for each test case.
+        cases: A list of records for each test case. Each record carries an `evaluator` key naming
+            the evaluator that produced that row.
         test_passes: A list of booleans indicating whether the test pass or fail.
         reasons: A list of reason for each test case.
     """
@@ -25,6 +26,71 @@ class EvaluationReport(BaseModel):
     test_passes: list[bool]
     reasons: list[str] = []
     detailed_results: list[list[EvaluationOutput]] = []
+    diagnoses: list[dict | None] = []
+    recommendations: list[str | None] = []
+
+    @classmethod
+    def flatten(cls, reports: list["EvaluationReport"]) -> "EvaluationReport":
+        """Concatenate multiple evaluation reports into one.
+
+        The base `Experiment` already returns a flattened report; this helper exists for callers
+        that built reports separately (e.g., across multiple experiments) and want to merge them.
+        Each row's `evaluator` tag is preserved as-is.
+        """
+        if not reports:
+            return cls(overall_score=0.0, scores=[], cases=[], test_passes=[])
+
+        scores, cases, passes, reasons, detailed, diags, recs = [], [], [], [], [], [], []
+
+        for report in reports:
+            for i, case in enumerate(report.cases):
+                cases.append(dict(case))
+                scores.append(report.scores[i] if i < len(report.scores) else 0.0)
+                passes.append(report.test_passes[i] if i < len(report.test_passes) else False)
+                reasons.append(report.reasons[i] if i < len(report.reasons) else "")
+                detailed.append(report.detailed_results[i] if i < len(report.detailed_results) else [])
+                diags.append(report.diagnoses[i] if i < len(report.diagnoses) else None)
+                recs.append(report.recommendations[i] if i < len(report.recommendations) else None)
+
+        return cls(
+            overall_score=sum(scores) / len(scores) if scores else 0.0,
+            scores=scores,
+            cases=cases,
+            test_passes=passes,
+            reasons=reasons,
+            detailed_results=detailed,
+            diagnoses=diags,
+            recommendations=recs,
+        )
+
+    @staticmethod
+    def format_input_for_display(input_value: object) -> str:
+        """Format an input value for display, handling multimodal inputs gracefully.
+
+        Detects serialized multimodal inputs (dicts with 'media' and 'instruction' keys)
+        and renders a readable summary instead of dumping raw binary or base64 data.
+        """
+        if isinstance(input_value, dict) and "media" in input_value and "instruction" in input_value:
+            instruction = input_value.get("instruction", "")
+            context = input_value.get("context")
+            media = input_value.get("media")
+
+            # Describe media without dumping raw data
+            if isinstance(media, list):
+                media_desc = f"[{len(media)} media item(s)]"
+            elif isinstance(media, dict):
+                media_desc = "[1 media item]"
+            elif isinstance(media, str) and len(media) > 200:
+                media_desc = f"[media: {media[:50]}...]"
+            else:
+                media_desc = f"[media: {media}]"
+
+            parts = [f"instruction: {instruction}"]
+            if context:
+                parts.append(f"context: {context}")
+            parts.append(media_desc)
+            return " | ".join(parts)
+        return str(input_value)
 
     def _display(
         self,
@@ -37,6 +103,7 @@ class EvaluationReport(BaseModel):
         include_actual_interactions: bool = False,
         include_expected_interactions: bool = False,
         include_meta: bool = False,
+        include_recommendations: bool = False,
     ):
         """
         Render an interface of the report with as much details as configured using Rich.
@@ -51,6 +118,7 @@ class EvaluationReport(BaseModel):
             include_actual_interactions (Defaults to False): Include the actual interactions in the display.
             include_expected_interactions (Defaults to False): Include the expected interactions in the display.
             include_meta (Defaults to False): Include metadata in the display.
+            include_recommendations (Defaults to False): Include diagnosis recommendations in the display.
 
         Note:
             This method provides an interactive console interface where users can expand or collapse
@@ -60,14 +128,15 @@ class EvaluationReport(BaseModel):
         for i in range(len(self.scores)):
             name = self.cases[i].get("name", f"Test {i + 1}")
             reason = self.reasons[i] if i < len(self.reasons) else "N/A"
-            details_dict = {
-                "name": name,
-                "score": f"{self.scores[i]:.2f}",
-                "test_pass": self.test_passes[i],
-                "reason": reason,
-            }
+            details_dict = {"name": name}
+            # Include evaluator column for flattened reports (right after name)
+            if "evaluator" in self.cases[i]:
+                details_dict["evaluator"] = self.cases[i]["evaluator"]
+            details_dict["score"] = f"{self.scores[i]:.2f}"
+            details_dict["test_pass"] = self.test_passes[i]
+            details_dict["reason"] = reason
             if include_input:
-                details_dict["input"] = str(self.cases[i].get("input"))
+                details_dict["input"] = self.format_input_for_display(self.cases[i].get("input"))
             if include_actual_output:
                 details_dict["actual_output"] = str(self.cases[i].get("actual_output"))
             if include_expected_output:
@@ -82,6 +151,10 @@ class EvaluationReport(BaseModel):
                 details_dict["expected_interactions"] = str(self.cases[i].get("expected_interactions"))
             if include_meta:
                 details_dict["metadata"] = str(self.cases[i].get("metadata"))
+            if include_recommendations:
+                rec = self.recommendations[i] if i < len(self.recommendations) else None
+                if rec is not None:
+                    details_dict["recommendation"] = rec
 
             report_data[str(i)] = {
                 "details": details_dict,
@@ -102,6 +175,7 @@ class EvaluationReport(BaseModel):
         include_actual_interactions: bool = False,
         include_expected_interactions: bool = False,
         include_meta: bool = False,
+        include_recommendations: bool = False,
     ):
         """
         Render the report with as much details as configured using Rich. Use run_display if want
@@ -116,6 +190,7 @@ class EvaluationReport(BaseModel):
             include_actual_interactions (Defaults to False): Include the actual interactions in the display.
             include_expected_interactions (Defaults to False): Include the expected interactions in the display.
             include_meta (Defaults to False): Include metadata in the display.
+            include_recommendations (Defaults to False): Include diagnosis recommendations in the display.
         """
         self._display(
             static=True,
@@ -127,6 +202,7 @@ class EvaluationReport(BaseModel):
             include_actual_interactions=include_actual_interactions,
             include_expected_interactions=include_expected_interactions,
             include_meta=include_meta,
+            include_recommendations=include_recommendations,
         )
 
     def run_display(
@@ -139,6 +215,7 @@ class EvaluationReport(BaseModel):
         include_actual_interactions: bool = False,
         include_expected_interactions: bool = False,
         include_meta: bool = False,
+        include_recommendations: bool = False,
     ):
         """
         Render the report interactively with as much details as configured using Rich.
@@ -152,6 +229,7 @@ class EvaluationReport(BaseModel):
             include_actual_interactions (Defaults to False): Include the actual interactions in the display.
             include_expected_interactions (Defaults to False): Include the expected interactions in the display.
             include_meta (Defaults to False): Include metadata in the display.
+            include_recommendations (Defaults to False): Include diagnosis recommendations in the display.
         """
         self._display(
             static=False,
@@ -163,6 +241,7 @@ class EvaluationReport(BaseModel):
             include_actual_interactions=include_actual_interactions,
             include_expected_interactions=include_expected_interactions,
             include_meta=include_meta,
+            include_recommendations=include_recommendations,
         )
 
     def to_dict(self):

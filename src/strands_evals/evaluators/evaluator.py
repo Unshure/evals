@@ -1,8 +1,9 @@
+import asyncio
 import inspect
 import logging
 
 from strands.models.model import Model
-from typing_extensions import Any, Generic, TypeGuard, Union
+from typing_extensions import Any, Generic, TypeGuard
 
 from ..extractors import TraceExtractor
 from ..types.evaluation import EvaluationData, EvaluationOutput, InputT, OutputT
@@ -20,7 +21,7 @@ from ..types.trace import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BEDROCK_MODEL_ID = "us.anthropic.claude-sonnet-4-20250514-v1:0"
+DEFAULT_BEDROCK_MODEL_ID = "global.anthropic.claude-sonnet-4-6"
 
 
 class Evaluator(Generic[InputT, OutputT]):
@@ -35,20 +36,28 @@ class Evaluator(Generic[InputT, OutputT]):
     evaluation_level: EvaluationLevel | None = None
     _trace_extractor: TraceExtractor | None = None
 
-    def __init__(self, trace_extractor: TraceExtractor | None = None):
+    def __init__(self, trace_extractor: TraceExtractor | None = None, name: str | None = None):
         """Initialize evaluator with optional custom trace extractor.
 
         Args:
             trace_extractor: Custom trace extractor. If None and evaluation_level is set,
                            a default TraceExtractor will be created.
+            name: Instance-level identifier used as the evaluator tag in
+                `EvaluationReport.cases[i]["evaluator"]` and as
+                `gen_ai.evaluation.name` on emitted spans/logs. When two
+                instances of the same class run in one experiment (e.g.,
+                `Contains(value="x")` and `Contains(value="y")`), distinct
+                names keep their results from colliding. Defaults to the
+                class name when unset.
         """
         self.aggregator = self._default_aggregator
+        self.name = name
         if trace_extractor:
             self._trace_extractor = trace_extractor
         elif self.evaluation_level:
             self._trace_extractor = TraceExtractor(self.evaluation_level)
 
-    def _get_model_id(self, model: Union[Model, str, None]) -> str:
+    def _get_model_id(self, model: Model | str | None) -> str:
         """Extract model_id from a Model instance or string for serialization.
 
         This helper method should be called in subclass __init__ methods that accept a model parameter.
@@ -95,15 +104,13 @@ class Evaluator(Generic[InputT, OutputT]):
         """
         Evaluate the performance of the task on the given test cases asynchronously.
 
+        Delegates to evaluate() via asyncio.to_thread by default, ensuring subclasses
+        that only implement evaluate() work in the async path.
+
         Args:
             evaluation_case: The test case with all of the neccessary context to be evaluated.
-
-        Raises:
-            NotImplementedError: This method is not implemented in the base class.
         """
-        raise NotImplementedError(
-            "This method should be implemented in subclasses, especially if you want to run evaluations asynchronously."
-        )
+        return await asyncio.to_thread(self.evaluate, evaluation_case)
 
     def _parse_trajectory(self, evaluation_case: EvaluationData[InputT, OutputT]) -> Any:
         """Parse Session trajectory using TraceExtractor."""
@@ -128,9 +135,49 @@ class Evaluator(Generic[InputT, OutputT]):
             )
         return parsed_inputs[-1]
 
+    def _extract_user_prompt(self, parsed_input: TraceLevelInput) -> str:
+        """Extract user prompt from last message in session history.
+
+        Args:
+            parsed_input: Trace-level input containing session history
+
+        Returns:
+            User prompt text, or empty string if not available
+        """
+        if not parsed_input.session_history:
+            return ""
+
+        last_msg = parsed_input.session_history[-1]
+        if not isinstance(last_msg, list) and self._has_text_content(last_msg):
+            first_content = last_msg.content[0]
+            if isinstance(first_content, TextContent):
+                return first_content.text
+
+        return ""
+
     def _format_tools(self, tools: list[ToolConfig]) -> str:
-        """Format available tools for prompt display."""
-        return "\n".join([f"- {tool.name}: {tool.description or 'No description'}" for tool in tools])
+        """Format available tools for prompt display, including parameter schemas."""
+        tool_lines = []
+        for tool in tools:
+            desc = tool.description or "No description"
+            if tool.parameters:
+                params = tool.parameters
+                properties = params.get("properties", {})
+                required = params.get("required", [])
+                param_details = []
+                for param_name, param_info in properties.items():
+                    param_type = param_info.get("type", "any")
+                    param_desc = param_info.get("description", "")
+                    req_marker = " (required)" if param_name in required else ""
+                    param_details.append(f"    - {param_name} ({param_type}{req_marker}): {param_desc}")
+                if param_details:
+                    params_str = "\n".join(param_details)
+                    tool_lines.append(f"- {tool.name}: {desc}\n  Parameters:\n{params_str}")
+                else:
+                    tool_lines.append(f"- {tool.name}: {desc}")
+            else:
+                tool_lines.append(f"- {tool.name}: {desc}")
+        return "\n".join(tool_lines)
 
     def _format_session_history(self, contexts: list[Context]) -> str:
         """Format session history with tool executions for prompt display."""
@@ -151,6 +198,16 @@ class Evaluator(Generic[InputT, OutputT]):
         # Format available tools
         if tool_input.available_tools:
             parts.append(f"## Available tool-calls\n{self._format_tools(tool_input.available_tools)}")
+        else:
+            logger.debug(
+                "span_id=<%s> | no available tools resolved for tool-level evaluation",
+                tool_input.span_info.span_id,
+            )
+            parts.append(
+                "## Available tool-calls\n"
+                "No tool list could be resolved for this agent. "
+                "Evaluate the tool call based on the user's request and conversation context."
+            )
 
         # Format previous conversation history
         if tool_input.session_history:
@@ -244,6 +301,18 @@ class Evaluator(Generic[InputT, OutputT]):
             str: The name of the evaluator type.
         """
         return cls.__name__
+
+    def get_name(self) -> str:
+        """Get the instance-level evaluator name, falling back to the class name.
+
+        Used for the per-row `evaluator` tag in `EvaluationReport` and the
+        `gen_ai.evaluation.name` OTel attribute. `get_type_name()` is still
+        used for class-keyed lookups such as `from_dict` registry resolution.
+
+        Returns:
+            str: The instance name if set, otherwise the class name.
+        """
+        return self.name or self.get_type_name()
 
     def to_dict(self) -> dict:
         """
